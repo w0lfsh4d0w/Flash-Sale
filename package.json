@@ -1,0 +1,29 @@
+{
+  "name": "flash-sale",
+  "version": "1.0.0",
+  "description": "A backend API for booking tickets to events, built to survive the moment when thousands of people hit \"book\" at the same time on a limited number of tickets.",
+  "main": "server.js",
+  "scripts": {
+    "dev": "nodemon server.js",
+    "start": "node server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/w0lfsh4d0w/Flash-Sale.git"
+  },
+  "author": "Mohamed Hagag",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/w0lfsh4d0w/Flash-Sale/issues"
+  },
+  "homepage": "https://github.com/w0lfsh4d0w/Flash-Sale#readme",
+  "dependencies": {
+    "dotenv": "^18.0.8",
+    "express": "^5.3.0",
+    "mongoose": "^9.11.2",
+    "morgan": "^1.12.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}

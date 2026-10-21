@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  # 1) App Service (Node.js)
+  app:
+    build: .
+    command: npm run dev
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - DATABASE_URL=mongodb://mongo_db:27017/flash-sale
+    volumes:
+      - .:/app
+      - /app/node_modules
+    depends_on:
+      - mongo_db
+    # 2) Database Service (MongoDB)
+  mongo_db:
+    image: mongo:latest
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+# Persistent storage for database
+volumes:
+  mongo_data:
