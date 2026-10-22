@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const dotenv = require('dotenv');
 
+// 1. Handling Uncaught Exceptions
 process.on('uncaughtException', (err) => {
   console.log(err.name, err.message);
   console.log('UNCAUGHT EXCEPTION! 💥 Shutting down...');
@@ -8,11 +9,14 @@ process.on('uncaughtException', (err) => {
 });
 
 dotenv.config({ path: './config.env' });
+
+
 const app = require('./app');
 
 const port = process.env.PORT || 3000;
 let server;
 
+// 3. Database Connection & Server Start
 mongoose
   .connect(process.env.DATABASE_LOCAL)
   .then(() => {
@@ -26,6 +30,7 @@ mongoose
     process.exit(1);
   });
 
+// 4. Handling Unhandled Rejections
 process.on('unhandledRejection', (err) => {
   console.log(err.name, err.message);
   console.log('UNHANDLED REJECTION! 💥 Shutting down...');

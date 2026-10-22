@@ -1,6 +1,6 @@
 const express = require('express');
 const morgan = require('morgan');
-
+const mongoose = require('mongoose');
 const AppError = require('./utils/appError');
 const globalErrorHandler = require('./controllers/errorController');
 
@@ -14,7 +14,19 @@ if (process.env.NODE_ENV === 'development') {
 app.use(express.json({ limit: '10kb' }));
 
 // 2) ROUTES (each endpoint gets added here)
-
+app.get('/health', (req, res) => {
+  isDbConnected = mongoose.connection.readyState === 1;
+  if (isDbConnected) {
+    return res.status(200).json({
+      status: 'success',
+      message: 'Server is healthy and DB is connected',
+    });
+  }
+  return res.status(503).json({
+    status: 'erro',
+    message: 'DB is disconnected',
+  });
+});
 // 3) 404 for any route that doesn't exist
 app.use((req, res, next) => {
   next(new AppError(`Can't find ${req.originalUrl} on this server!`, 404));
