@@ -3,7 +3,7 @@ const morgan = require('morgan');
 const mongoose = require('mongoose');
 const AppError = require('./utils/appError');
 const globalErrorHandler = require('./controllers/errorController');
-
+const eventRouter = require('./routes/eventRoute');
 const app = express();
 
 // 1) GLOBAL MIDDLEWARES
@@ -27,6 +27,7 @@ app.get('/health', (req, res) => {
     message: 'DB is disconnected',
   });
 });
+app.use('/api/v1/events', eventRouter);
 // 3) 404 for any route that doesn't exist
 app.use((req, res, next) => {
   next(new AppError(`Can't find ${req.originalUrl} on this server!`, 404));
