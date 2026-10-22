@@ -27,15 +27,27 @@ I'm starting with a naive version on purpose, measuring how bad it gets, and the
 
 Booking status can be `reserved`, `confirmed`, `expired`, or `cancelled`. All prices are stored as integers in cents, never floats.
 
+Field names in the code are camelCase (`availableTickets`, `priceCents`), while the diagram above uses snake_case.
+
+## API
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/events` | Create an event (`name`, `totalTickets`, `priceCents`) |
+| GET | `/events/:id` | Get an event and its available tickets |
+| POST | `/events/:id/book` | Book tickets (`userId`, `quantity` from 1 to 4) |
+
+All errors return a consistent JSON response (`status` and `message`).
+
 ## Tech Stack
 
-Node.js, Express, MongoDB (Mongoose), Redis, BullMQ, Docker.
+Node.js, Express 5, MongoDB (Mongoose), Redis, BullMQ, Docker.
 
 ## Stages
 
 | # | Stage | Status |
 |---|-------|--------|
-| 1 | Naive booking + baseline numbers | In progress |
+| 1 | Naive booking + baseline numbers | In progress (API done, benchmark next) |
 | 2 | Atomic update in MongoDB | Not started |
 | 3 | Redis for stock and caching | Not started |
 | 4 | BullMQ queues and workers | Not started |
@@ -43,11 +55,23 @@ Node.js, Express, MongoDB (Mongoose), Redis, BullMQ, Docker.
 | 6 | Docker Compose, nginx, CI/CD, deploy | Not started |
 | 7 | Tests, logging, final benchmarks | Not started |
 
+## Known limitations (current stage)
+
+- There is no login yet. `userId` comes from the request body and isn't checked against a real user. Authentication comes in stage 5.
+- The booking logic is naive on purpose (read, check, write). Overselling under concurrent load is expected, and it's the baseline the next stages improve.
+- Only the first rule of the business rules is enforced for now. The others come in later stages.
+
+## How I measure
+
+- The API and MongoDB both run in Docker, and I keep the same setup in every stage so the numbers are comparable.
+- I run the benchmark with `NODE_ENV=production` so request logging doesn't affect the results.
+- The data is reset before every run, and each result is the average of 3 runs.
+
 ## Results
 
 Same test every time: 1,000 tickets, 5,000 concurrent requests, each from a different user.
 
-| Stage | req/sec | p95 latency | Errors | Bookings / Tickets |
+| Stage | req/sec | p99 latency | Errors | Bookings / Tickets |
 |-------|---------|-------------|--------|--------------------|
 | 1. Naive | - | - | - | - |
 | 2. Mongo atomic | - | - | - | - |
@@ -55,4 +79,8 @@ Same test every time: 1,000 tickets, 5,000 concurrent requests, each from a diff
 
 ## Running the project
 
-Coming soon.
+```bash
+docker compose up --build
+```
+
+The API runs on `http://localhost:3000`. Create a `config.env` file first (see `config.example.env`).
