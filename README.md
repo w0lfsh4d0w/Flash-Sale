@@ -31,11 +31,11 @@ Field names in the code are camelCase (`availableTickets`, `priceCents`), while 
 
 ## API
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/events` | Create an event (`name`, `totalTickets`, `priceCents`) |
-| GET | `/events/:id` | Get an event and its available tickets |
-| POST | `/events/:id/book` | Book tickets (`userId`, `quantity` from 1 to 4) |
+| Method | Endpoint                  | Description                                            |
+| ------ | ------------------------- | ------------------------------------------------------ |
+| POST   | `/api/v1/events`          | Create an event (`name`, `totalTickets`, `priceCents`) |
+| GET    | `/api/v1/events/:id`      | Get an event and its available tickets                 |
+| POST   | `/api/v1/events/:id/book` | Book tickets (`userId`, `quantity` from 1 to 4)        |
 
 All errors return a consistent JSON response (`status` and `message`).
 
@@ -45,15 +45,15 @@ Node.js, Express 5, MongoDB (Mongoose), Redis, BullMQ, Docker.
 
 ## Stages
 
-| # | Stage | Status |
-|---|-------|--------|
-| 1 | Naive booking + baseline numbers | In progress (API done, benchmark next) |
-| 2 | Atomic update in MongoDB | Not started |
-| 3 | Redis for stock and caching | Not started |
-| 4 | BullMQ queues and workers | Not started |
-| 5 | Reservations, events, mock payment | Not started |
-| 6 | Docker Compose, nginx, CI/CD, deploy | Not started |
-| 7 | Tests, logging, final benchmarks | Not started |
+| #   | Stage                                | Status      |
+| --- | ------------------------------------ | ----------- |
+| 1   | Naive booking + baseline numbers     | Done        |
+| 2   | Atomic update in MongoDB             | Not started |
+| 3   | Redis for stock and caching          | Not started |
+| 4   | BullMQ queues and workers            | Not started |
+| 5   | Reservations, events, mock payment   | Not started |
+| 6   | Docker Compose, nginx, CI/CD, deploy | Not started |
+| 7   | Tests, logging, final benchmarks     | Not started |
 
 ## Known limitations (current stage)
 
@@ -65,22 +65,36 @@ Node.js, Express 5, MongoDB (Mongoose), Redis, BullMQ, Docker.
 
 - The API and MongoDB both run in Docker, and I keep the same setup in every stage so the numbers are comparable.
 - I run the benchmark with `NODE_ENV=production` so request logging doesn't affect the results.
-- The data is reset before every run, and each result is the average of 3 runs.
+- A fresh event with 1,000 tickets is created for each run, and each result is the average of 3 runs.
+
+## Test Environment
+
+- **Host Specs:** 8 CPU Cores, 8 GB RAM.
+- **Docker Allocation:** Default Docker Desktop settings.
+- **Node.js Environment:** `NODE_ENV=production` inside Docker.
+- **Load Test Tool:** `autocannon`
+  - `amount`: 5,000 requests
+  - `connections`: 200 concurrent connections
+  - `excludeErrorStats`: false
 
 ## Results
 
-Same test every time: 1,000 tickets, 5,000 concurrent requests, each from a different user.
+Same test every time: 1,000 tickets, 5,000 concurrent requests, each from a different user (`quantity: 1`).
 
-| Stage | req/sec | p99 latency | Errors | Bookings / Tickets |
-|-------|---------|-------------|--------|--------------------|
-| 1. Naive | - | - | - | - |
-| 2. Mongo atomic | - | - | - | - |
-| 3. Redis | - | - | - | - |
+| Stage               | Strategy                   | req/sec     | p99 latency | Errors | Bookings / Tickets | Oversold |
+| ------------------- | -------------------------- | ----------- | ----------- | ------ | ------------------ | -------- |
+| **1. Naive**        | Read-then-write (Baseline) | 308.5 req/s | 1,847.3 ms  | 0      | 5,000 / 1,000      | +4,000   |
+| **2. Mongo atomic** | Atomic update              | -           | -           | -      | -                  | -        |
+| **3. Redis**        | In-memory stock            | -           | -           | -      | -                  | -        |
+
+### What I Saw in Stage 1
+
+- **Massive Overselling:** Under a naive read-then-write pattern, all 5,000 incoming requests succeeded with `201 Created` status codes despite there being only 1,000 tickets available (+4,000 oversold).
+- **Lost Updates (Race Condition):** Concurrent requests read the same initial `availableTickets` count and overwrote each other's updates. Instead of dropping to `0`, the final `availableTickets` counter remained around `~900` tickets in MongoDB.
+- **Latency Spikes:** Handling 200 concurrent connections led to significant queuing in the Event Loop, with p99 latency reaching ~1.85 seconds.
 
 ## Running the project
 
 ```bash
 docker compose up --build
 ```
-
-The API runs on `http://localhost:3000`. Create a `config.env` file first (see `config.example.env`).
