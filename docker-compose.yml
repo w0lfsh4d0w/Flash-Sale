@@ -8,7 +8,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NODE_ENV=development
+      - NODE_ENV=${NODE_ENV:-development}
       - PORT=3000
       - DATABASE_URL=mongodb://mongo_db:27017/flash-sale
     volumes:
