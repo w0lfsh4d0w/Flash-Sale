@@ -10,7 +10,10 @@ exports.createEvent = async (req, res) => {
   const { name, totalTickets, priceCents } = req.body;
 
   if (!name || totalTickets === undefined || priceCents === undefined) {
-    throw new AppError('Please provide name, totalTickets, and priceCents', 400);
+    throw new AppError(
+      'Please provide name, totalTickets, and priceCents',
+      400,
+    );
   }
 
   if (!Number.isInteger(totalTickets) || totalTickets < 1) {
@@ -53,11 +56,11 @@ exports.getEventById = async (req, res) => {
   });
 };
 
-
 exports.bookEventById = async (req, res) => {
   const { id } = req.params;
   const { userId, quantity } = req.body;
 
+  // 1) Validate everything before touching the database
   if (!isValidId(id)) {
     throw new AppError('Invalid event ID format', 400);
   }
@@ -70,26 +73,44 @@ exports.bookEventById = async (req, res) => {
     throw new AppError('quantity must be an integer from 1 to 4', 400);
   }
 
-  const event = await Event.findById(id);
+  // 2) Atomic check + decrement in a single operation
+  const updatedEvent = await Event.findOneAndUpdate(
+    { _id: id, availableTickets: { $gte: quantity } },
+    { $inc: { availableTickets: -quantity } },
+    { returnDocument: 'after' }
+  );
 
-  if (!event) {
-    throw new AppError('No event found with that ID', 404);
+  // 3) Failure path: tell "not found" apart from "sold out"
+  if (!updatedEvent) {
+    const event = await Event.findById(id);
+    if (!event) {
+      throw new AppError('No event found with that ID', 404);
+    }
+    throw new AppError('Not enough tickets available!', 400);
   }
 
-  if (event.availableTickets < quantity) {
-    throw new AppError('Not enough tickets available', 400);
+  // 4) Create the booking; if it fails, give the tickets back
+  let newBooking;
+  try {
+    newBooking = await Booking.create({
+      userId,
+      eventId: updatedEvent._id,
+      quantity,
+      totalPriceCents: quantity * updatedEvent.priceCents,
+    });
+  } catch (err) {
+    try {
+      await Event.updateOne(
+        { _id: id },
+        { $inc: { availableTickets: quantity } }
+      );
+    } catch (rollbackErr) {
+      console.error('ROLLBACK FAILED, tickets lost:', id, quantity, rollbackErr);
+    }
+    throw err;
   }
 
-  event.availableTickets -= quantity;
-  await event.save();
-
-  const newBooking = await Booking.create({
-    userId,
-    eventId: event._id,
-    quantity,
-    totalPriceCents: quantity * event.priceCents,
-  });
-
+  // 5) Respond only after everything succeeded
   res.status(201).json({
     status: 'success',
     data: { booking: newBooking },
