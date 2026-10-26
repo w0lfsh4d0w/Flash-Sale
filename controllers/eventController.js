@@ -1,7 +1,9 @@
 const mongoose = require('mongoose');
 const AppError = require('../utils/appError');
+const redis = require('./../utils/redis');
 const Event = require('../models/eventModel');
 const Booking = require('../models/bookingModel');
+const RESERVE_SCRIPT = require('../utils/reserveScript');
 
 const isValidId = (id) =>
   typeof id === 'string' && mongoose.Types.ObjectId.isValid(id);
@@ -30,7 +32,11 @@ exports.createEvent = async (req, res) => {
     availableTickets: totalTickets,
     priceCents,
   });
-
+  await redis.hset(`event:${newEvent._id}`, {
+    totalTickets: newEvent.totalTickets,
+    availableTickets: newEvent.availableTickets,
+    priceCents: newEvent.priceCents,
+  });
   res.status(201).json({
     status: 'success',
     data: { event: newEvent },
@@ -74,38 +80,44 @@ exports.bookEventById = async (req, res) => {
   }
 
   // 2) Atomic check + decrement in a single operation
-  const updatedEvent = await Event.findOneAndUpdate(
-    { _id: id, availableTickets: { $gte: quantity } },
-    { $inc: { availableTickets: -quantity } },
-    { returnDocument: 'after' }
+  // const updatedEvent = await Event.findOneAndUpdate(
+  //   { _id: id, availableTickets: { $gte: quantity } },
+  //   { $inc: { availableTickets: -quantity } },
+  //   { returnDocument: 'after' },
+  // );
+
+  // 3) atomic with redis
+  const [status, priceCents] = await redis.eval(
+    RESERVE_SCRIPT,
+    1,
+    `event:${id}`,
+    quantity,
   );
 
   // 3) Failure path: tell "not found" apart from "sold out"
-  if (!updatedEvent) {
-    const event = await Event.findById(id);
-    if (!event) {
-      throw new AppError('No event found with that ID', 404);
-    }
-    throw new AppError('Not enough tickets available!', 400);
-  }
+  if (status === -1) throw new AppError('No event found with that ID', 404);
+
+  if (status === 0) throw new AppError('Not enough tickets available!', 400);
 
   // 4) Create the booking; if it fails, give the tickets back
   let newBooking;
   try {
     newBooking = await Booking.create({
       userId,
-      eventId: updatedEvent._id,
+      eventId: id,
       quantity,
-      totalPriceCents: quantity * updatedEvent.priceCents,
+      totalPriceCents: quantity * priceCents,
     });
   } catch (err) {
     try {
-      await Event.updateOne(
-        { _id: id },
-        { $inc: { availableTickets: quantity } }
-      );
+      await redis.hincrby(`event:${id}`, 'availableTickets', quantity);
     } catch (rollbackErr) {
-      console.error('ROLLBACK FAILED, tickets lost:', id, quantity, rollbackErr);
+      console.error(
+        'ROLLBACK FAILED, tickets lost:',
+        id,
+        quantity,
+        rollbackErr,
+      );
     }
     throw err;
   }

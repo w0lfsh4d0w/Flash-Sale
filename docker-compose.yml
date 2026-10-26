@@ -1,3 +1,4 @@
+
 services:
   app:
     build: .
@@ -7,8 +8,10 @@ services:
       - NODE_ENV=${NODE_ENV:-development}
       - PORT=3000
       - DATABASE_LOCAL=mongodb://mongo_db:27017/flash-sale
+      - REDIS_URL=redis://redis:6379
     depends_on:
       - mongo_db
+      - redis
 
   mongo_db:
     image: mongo:latest
@@ -17,5 +20,15 @@ services:
     volumes:
       - mongo_data:/data/db
 
+  redis:
+    image: redis:7-alpine
+    container_name: ticket_redis
+    restart: always
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+
 volumes:
   mongo_data:
+  redis_data:

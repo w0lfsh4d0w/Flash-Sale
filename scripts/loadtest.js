@@ -1,6 +1,6 @@
 // Usage:
 //    node scripts/loadtest.js --smoke    (small trial run, just to check the script works)
-//    node scripts/loadtest.js stage1     (the real run; the argument is only a label for the result file)
+//    node scripts/loadtest.js stage3     (the real run; the argument is only a label for the result file)
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -8,7 +8,7 @@ const path = require('path');
 const autocannon = require('autocannon');
 const mongoose = require('mongoose');
 
-const Event = require('../models/eventModel');
+const redis = require('../utils/redis');
 const Booking = require('../models/bookingModel');
 
 // ---- Test settings: DO NOT change these between stages ----
@@ -24,7 +24,7 @@ const MONGO_URI =
 
 const args = process.argv.slice(2);
 const SMOKE = args.includes('--smoke');
-const label = args.find((a) => !a.startsWith('--')) || 'stage1';
+const label = args.find((a) => !a.startsWith('--')) || 'stage3';
 
 const amount = SMOKE ? 50 : AMOUNT;
 const connections = SMOKE ? 5 : CONNECTIONS;
@@ -93,7 +93,8 @@ async function main() {
   const result = await runLoad(eventId);
   process.stdout.write(autocannon.printResult(result));
 
-  // 3) Verify what really happened in the database
+  // 3) Verify what really happened
+  // Bookings live in MongoDB, the stock counter lives in Redis
   const agg = await Booking.aggregate([
     { $match: { eventId: new mongoose.Types.ObjectId(eventId) } },
     {
@@ -105,7 +106,9 @@ async function main() {
     },
   ]);
   const { bookings = 0, tickets = 0 } = agg[0] || {};
-  const event = await Event.findById(eventId);
+  const available = Number(
+    await redis.hget(`event:${eventId}`, 'availableTickets'),
+  );
 
   const stats = result.statusCodeStats || {};
   const created201 = Number(stats['201']?.count || 0);
@@ -127,10 +130,10 @@ async function main() {
     rejected400,
     bookingsInDb: bookings,
     ticketsBookedInDb: tickets,
-    availableTicketsFinal: event.availableTickets,
+    availableTicketsFinal: available, // read from Redis
     oversold: Math.max(0, tickets - TOTAL_TICKETS),
-    // 0 means the stock counter matches the bookings; above 0 means lost updates
-    stockMismatch: tickets + event.availableTickets - TOTAL_TICKETS,
+    // 0 means Redis counter and Mongo bookings agree; anything else means they drifted
+    stockMismatch: tickets + available - TOTAL_TICKETS,
   };
 
   console.log('\n=== SUMMARY ===');
@@ -147,6 +150,7 @@ async function main() {
   console.log(`Saved to ${file}`);
 
   await mongoose.disconnect();
+  await redis.quit();
 }
 
 main().catch((err) => {
