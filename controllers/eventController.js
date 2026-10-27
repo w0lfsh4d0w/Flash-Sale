@@ -49,13 +49,14 @@ exports.getEventById = async (req, res) => {
   if (!isValidId(id)) {
     throw new AppError('Invalid event ID format', 400);
   }
-
-  const event = await Event.findById(id);
+  const event = await Event.findById(id).lean();
 
   if (!event) {
     throw new AppError('No event found with that ID', 404);
   }
+  const availableRedis = await redis.hget(`event:${id}`, 'availableTickets');
 
+  if (availableRedis !== null) event.availableTickets = Number(availableRedis);
   res.status(200).json({
     status: 'success',
     data: { event },
