@@ -33,11 +33,11 @@ Since stage 3, each event also has a Redis hash at `event:<id>` with `totalTicke
 
 ## API
 
-| Method | Endpoint                  | Description                                            |
-| ------ | ------------------------- | ------------------------------------------------------ |
-| POST   | `/api/v1/events`          | Create an event (`name`, `totalTickets`, `priceCents`) |
-| GET    | `/api/v1/events/:id`      | Get an event and its available tickets                 |
-| POST   | `/api/v1/events/:id/book` | Book tickets (`userId`, `quantity` from 1 to 4)        |
+| Method | Endpoint                  | Description                                                           |
+| ------ | ------------------------- | --------------------------------------------------------------------- |
+| POST   | `/api/v1/events`          | Create an event (`name`, `totalTickets`, `priceCents`)                |
+| GET    | `/api/v1/events/:id`      | Get an event; `availableTickets` is the live number from Redis        |
+| POST   | `/api/v1/events/:id/book` | Book tickets (`userId`, `quantity` from 1 to 4)                       |
 
 All errors return a consistent JSON response (`status` and `message`).
 
@@ -52,7 +52,7 @@ Node.js, Express 5, MongoDB (Mongoose), Redis, BullMQ, Docker.
 | 1   | Naive booking + baseline numbers     | Done        |
 | 2   | Atomic update in MongoDB             | Done        |
 | 3   | Redis for stock (atomic Lua script)  | Done        |
-| 3b  | Redis cache for GET /events/:id      | Next        |
+| 3b  | GET /events/:id reads Redis stock    | Done        |
 | 4   | BullMQ queues and workers            | Not started |
 | 5   | Reservations, events, mock payment   | Not started |
 | 6   | Docker Compose, nginx, CI/CD, deploy | Not started |
@@ -62,7 +62,8 @@ Node.js, Express 5, MongoDB (Mongoose), Redis, BullMQ, Docker.
 
 - There is no login yet. `userId` comes from the request body and isn't checked against a real user. Authentication comes in stage 5.
 - If the server crashes between the atomic stock decrement in Redis and saving the booking in MongoDB, those tickets are lost. The code gives the tickets back when saving the booking fails, but it can't do that if the process dies. Queues (stage 4) and reservations (stage 5) address this.
-- The stock counter now lives in Redis, so the `availableTickets` field in MongoDB is no longer updated after an event is created. `GET /api/v1/events/:id` still reads from MongoDB and shows a stale number. This is fixed in stage 3b.
+- `GET /api/v1/events/:id` reads `availableTickets` from Redis. If the Redis hash is missing (for example after a Redis restart), it falls back to the number stored in MongoDB, which can be stale.
+- The `availableTickets` field in MongoDB is set once when the event is created and is not updated by bookings. This is on purpose: updating it on every booking would bring back the single-document bottleneck from stage 2. The live number is in Redis, and the record of what was actually sold is the Booking collection.
 - If Redis restarts, the counters can be lost or roll back to an older snapshot. Redis persistence (AOF) is not configured yet.
 - If saving the event hash in Redis fails after the event is created in MongoDB, that event answers 404 on every booking.
 - Business rules 1 and 4 are enforced. Rules 2 and 3 come in later stages.
@@ -99,6 +100,8 @@ Same test every time: 1,000 tickets, 5,000 requests sent over 200 concurrent con
 | **2. Mongo atomic** | Atomic update              | 608 (556 - 714)       | 615 ms (394 - 745 ms)    | 0      | 4,000               | 1,000 / 1,000      | 0        |
 | **3. Redis**        | Atomic Lua script in Redis | 1,389 (1,250 - 1,667) | 427 ms (300 - 492 ms)    | 0      | 4,000               | 1,000 / 1,000      | 0        |
 
+Stage 3b only changed `GET /events/:id`, not the booking path, so it has no new benchmark.
+
 ### What I Saw in Stage 1
 
 - **Massive overselling:** All 5,000 requests succeeded with `201 Created`, even though there were only 1,000 tickets (+4,000 oversold), in all 3 runs.
@@ -120,7 +123,8 @@ Same test every time: 1,000 tickets, 5,000 requests sent over 200 concurrent con
 - **Throughput improved:** 1,389 req/s on average vs 608 in stage 2. The ranges (1,250-1,667 vs 556-714) don't overlap, so this is not just noise.
 - **p99 is less clear:** 427 ms vs 615 ms, but the ranges overlap (300-492 vs 394-745), so I can't claim p99 improved.
 - **Caveats:** Each run lasted only 3-4 seconds, so autocannon took just 3-4 samples per run, which makes the numbers less precise than in earlier stages. There were only 3 runs. The explanation (rejections no longer reach MongoDB) is my reasoning, not something I measured.
-- **What's next:** Stage 3b adds a cache for `GET /events/:id`, then stage 4 adds queues.
+- **Stage 3b:** Moving the counter to Redis made `GET /events/:id` show a stale number, because MongoDB was no longer updated. It now reads `availableTickets` from Redis and keeps the rest of the event from MongoDB. If the hash is missing, it falls back to MongoDB's number.
+- **What's next:** Stage 4 adds queues and workers.
 
 ## Running the project
 
