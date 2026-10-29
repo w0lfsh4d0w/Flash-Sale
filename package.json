@@ -18,6 +18,7 @@
   },
   "homepage": "https://github.com/w0lfsh4d0w/Flash-Sale#readme",
   "dependencies": {
+    "bullmq": "^6.5.0",
     "dotenv": "^18.0.8",
     "express": "^5.3.0",
     "ioredis": "^6.0.0",

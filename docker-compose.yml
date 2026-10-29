@@ -9,8 +9,24 @@ services:
       - PORT=3000
       - DATABASE_LOCAL=mongodb://mongo_db:27017/flash-sale
       - REDIS_URL=redis://redis:6379
+      - QUEUE_REDIS_URL=redis://redis_queue:6379
     depends_on:
       - mongo_db
+      - redis
+      - redis_queue
+
+
+  worker:
+    build: .
+    command: node worker.js
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - DATABASE_LOCAL=mongodb://mongo_db:27017/flash-sale
+      - QUEUE_REDIS_URL=redis://redis_queue:6379
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - mongo_db
+      - redis_queue
       - redis
 
   mongo_db:
@@ -19,6 +35,7 @@ services:
       - "127.0.0.1:27017:27017"
     volumes:
       - mongo_data:/data/db
+
 
   redis:
     image: redis:7-alpine
@@ -29,6 +46,18 @@ services:
     volumes:
       - redis_data:/data
 
+
+  redis_queue:
+    image: redis:7-alpine
+    container_name: ticket_redis_queue
+    restart: always
+    command: redis-server --maxmemory 256mb --maxmemory-policy noeviction
+    ports:
+      - "127.0.0.1:6380:6379"
+    volumes:
+      - redis_queue_data:/data
+
 volumes:
   mongo_data:
   redis_data:
+  redis_queue_data:

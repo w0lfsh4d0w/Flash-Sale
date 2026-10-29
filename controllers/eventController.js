@@ -4,6 +4,7 @@ const redis = require('./../utils/redis');
 const Event = require('../models/eventModel');
 const Booking = require('../models/bookingModel');
 const RESERVE_SCRIPT = require('../utils/reserveScript');
+const bookingQueue = require('../utils/bookingQueue');
 
 const isValidId = (id) =>
   typeof id === 'string' && mongoose.Types.ObjectId.isValid(id);
@@ -80,13 +81,6 @@ exports.bookEventById = async (req, res) => {
     throw new AppError('quantity must be an integer from 1 to 4', 400);
   }
 
-  // 2) Atomic check + decrement in a single operation
-  // const updatedEvent = await Event.findOneAndUpdate(
-  //   { _id: id, availableTickets: { $gte: quantity } },
-  //   { $inc: { availableTickets: -quantity } },
-  //   { returnDocument: 'after' },
-  // );
-
   // 3) atomic with redis
   const [status, priceCents] = await redis.eval(
     RESERVE_SCRIPT,
@@ -100,15 +94,21 @@ exports.bookEventById = async (req, res) => {
 
   if (status === 0) throw new AppError('Not enough tickets available!', 400);
 
-  // 4) Create the booking; if it fails, give the tickets back
-  let newBooking;
+  // (4.1 set booking in queue
+
+  // Make id
+  const bookingId = new mongoose.Types.ObjectId();
+  // add job to queu
+
   try {
-    newBooking = await Booking.create({
+    await bookingQueue.add('create-booking', {
+      bookingId: bookingId.toString(),
       userId,
       eventId: id,
       quantity,
       totalPriceCents: quantity * priceCents,
     });
+    await redis.set(`booking:${bookingId}`, 'processing', 'EX', 3600);
   } catch (err) {
     try {
       await redis.hincrby(`event:${id}`, 'availableTickets', quantity);
@@ -123,9 +123,10 @@ exports.bookEventById = async (req, res) => {
     throw err;
   }
 
+  // edit response
   // 5) Respond only after everything succeeded
-  res.status(201).json({
-    status: 'success',
-    data: { booking: newBooking },
+  res.status(202).json({
+    status: 'processing',
+    data: { bookingId },
   });
 };

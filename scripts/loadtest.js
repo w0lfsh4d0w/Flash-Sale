@@ -1,6 +1,6 @@
 // Usage:
 //    node scripts/loadtest.js --smoke    (small trial run, just to check the script works)
-//    node scripts/loadtest.js stage3     (the real run; the argument is only a label for the result file)
+//    node scripts/loadtest.js stage4     (the real run; the argument is only a label for the result file)
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -24,7 +24,7 @@ const MONGO_URI =
 
 const args = process.argv.slice(2);
 const SMOKE = args.includes('--smoke');
-const label = args.find((a) => !a.startsWith('--')) || 'stage3';
+const label = args.find((a) => !a.startsWith('--')) || 'stage4';
 
 const amount = SMOKE ? 50 : AMOUNT;
 const connections = SMOKE ? 5 : CONNECTIONS;
@@ -34,7 +34,6 @@ const randomObjectId = () => crypto.randomBytes(12).toString('hex');
 
 // 1) Create a fresh event for this run
 async function createEvent() {
-  // Fixed route prefix to match app.use('/api/v1/events', eventRouter)
   const res = await fetch(`${API_URL}/api/v1/events`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -57,7 +56,6 @@ async function createEvent() {
 
 // 2) Fire the requests
 function runLoad(eventId) {
-  // Fixed route prefix to match app.use('/api/v1/events', eventRouter)
   const bookingPath = `/api/v1/events/${eventId}/book`;
 
   return autocannon({
@@ -82,6 +80,18 @@ function runLoad(eventId) {
   });
 }
 
+// 3) Wait until the worker has written all accepted bookings to MongoDB
+async function waitForDrain(eventId, expected, timeoutMs = 60000) {
+  const start = Date.now();
+  const oid = new mongoose.Types.ObjectId(eventId);
+  while (Date.now() - start < timeoutMs) {
+    const count = await Booking.countDocuments({ eventId: oid });
+    if (count >= expected) return Date.now() - start;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return null; // did not finish within the timeout
+}
+
 async function main() {
   await mongoose.connect(MONGO_URI);
 
@@ -93,7 +103,14 @@ async function main() {
   const result = await runLoad(eventId);
   process.stdout.write(autocannon.printResult(result));
 
-  // 3) Verify what really happened
+  const stats = result.statusCodeStats || {};
+  const accepted202 = Number(stats['202']?.count || 0);
+  const rejected400 = Number(stats['400']?.count || 0);
+
+  // How long after the last response until the last booking is in MongoDB
+  const drainMs = await waitForDrain(eventId, accepted202);
+
+  // 4) Verify what really happened
   // Bookings live in MongoDB, the stock counter lives in Redis
   const agg = await Booking.aggregate([
     { $match: { eventId: new mongoose.Types.ObjectId(eventId) } },
@@ -110,10 +127,6 @@ async function main() {
     await redis.hget(`event:${eventId}`, 'availableTickets'),
   );
 
-  const stats = result.statusCodeStats || {};
-  const created201 = Number(stats['201']?.count || 0);
-  const rejected400 = Number(stats['400']?.count || 0);
-
   const summary = {
     label,
     smoke: SMOKE,
@@ -123,10 +136,11 @@ async function main() {
     avgLatencyMs: result.latency.average,
     p99LatencyMs: result.latency.p99,
     durationSec: result.duration,
+    drainSec: drainMs === null ? null : drainMs / 1000,
     errors: result.errors,
     timeouts: result.timeouts,
     non2xx: result.non2xx,
-    created201,
+    accepted202,
     rejected400,
     bookingsInDb: bookings,
     ticketsBookedInDb: tickets,
@@ -139,7 +153,7 @@ async function main() {
   console.log('\n=== SUMMARY ===');
   console.log(summary);
 
-  // 4) Save the raw result
+  // 5) Save the raw result
   const dir = path.join(__dirname, '..', 'results');
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(
