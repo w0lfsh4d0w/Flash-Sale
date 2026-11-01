@@ -1,0 +1,11 @@
+services:
+  app:
+    command: npx nodemon server.js
+    volumes:
+      - ./:/app
+      - /app/node_modules
+  worker:
+    command: npx nodemon worker.js
+    volumes:
+      - ./:/app
+      - /app/node_modules

@@ -19,6 +19,7 @@ services:
   worker:
     build: .
     command: node worker.js
+    restart: on-failure
     environment:
       - NODE_ENV=${NODE_ENV:-development}
       - DATABASE_LOCAL=mongodb://mongo_db:27017/flash-sale
