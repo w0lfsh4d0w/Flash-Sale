@@ -5,6 +5,7 @@ const AppError = require('./utils/appError');
 const globalErrorHandler = require('./controllers/errorController');
 const eventRouter = require('./routes/eventRoute');
 const bookingRouter = require('./routes/bookingRoute');
+const authRouter = require('./routes/authRoute');
 const app = express();
 
 // 1) GLOBAL MIDDLEWARES
@@ -30,6 +31,7 @@ app.get('/health', (req, res) => {
 });
 app.use('/api/v1/events', eventRouter);
 app.use('/api/v1/bookings', bookingRouter);
+app.use('/api/v1/auth', authRouter);
 // 3) 404 for any route that doesn't exist
 app.use((req, res, next) => {
   next(new AppError(`Can't find ${req.originalUrl} on this server!`, 404));
