@@ -66,20 +66,22 @@ exports.getEventById = async (req, res) => {
 
 exports.bookEventById = async (req, res) => {
   const { id } = req.params;
-  const { userId, quantity } = req.body;
-
+  const { quantity } = req.body;
+  const userId = req.user.id
   // 1) Validate everything before touching the database
   if (!isValidId(id)) {
     throw new AppError('Invalid event ID format', 400);
   }
 
-  if (!isValidId(userId)) {
-    throw new AppError('A valid userId is required', 400);
-  }
 
   if (!Number.isInteger(quantity) || quantity < 1 || quantity > 4) {
     throw new AppError('quantity must be an integer from 1 to 4', 400);
   }
+
+  // check if user book this event before 
+
+  const existing = await Booking.findOne({ userId, eventId: id });
+  if (existing) throw new AppError('You already Booked this event', 409);
 
   // 3) atomic with redis
   const [status, priceCents] = await redis.eval(

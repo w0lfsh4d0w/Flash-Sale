@@ -43,7 +43,12 @@ const bookingSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-bookingSchema.index({ userId: 1 });
-bookingSchema.index({ eventId: 1 });
+bookingSchema.index(
+  { userId: 1, eventId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { status: { $in: ['reserved', 'confirmed'] } },
+  },
+);
 
 module.exports = mongoose.model('Booking', bookingSchema);
