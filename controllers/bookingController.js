@@ -19,7 +19,7 @@ exports.getBookingById = async (req, res) => {
       status: 'success',
       data: {
         bookingId: id,
-        bookingState: state, 
+        bookingState: state,
       },
     });
   }
@@ -36,4 +36,35 @@ exports.getBookingById = async (req, res) => {
   }
 
   throw new AppError('No booking found with that ID', 404);
+};
+
+exports.payBooking = async (req, res) => {
+  const { id } = req.params;
+  // atomic update
+  const booking = await  Booking.findOneAndUpdate(
+    {
+      _id: id,
+      userId: req.user.id,
+      status: 'reserved',
+      expiresAt: { $gt: new Date() },
+    },
+    {
+      status: 'confirmed',
+      expiresAt: null,
+    },
+    {
+      returnDocument: 'after',
+    },
+  );
+
+  if (!booking) {
+    throw new AppError('Reservation has expired or cannot be confirmed', 409);
+  }
+
+  res.status(200).json({
+    status: 'success',
+    data: {
+      booking,
+    },
+  });
 };

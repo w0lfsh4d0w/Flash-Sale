@@ -1,7 +1,8 @@
 const User = require('./../models/userModel');
+const Booking = require('./../models/bookingModel');
 const mongoose = require('mongoose');
 const AppError = require('../utils/appError');
-const jwt  = require('jsonwebtoken')
+const jwt = require('jsonwebtoken');
 const isValidId = (id) =>
   typeof id === 'string' && mongoose.Types.ObjectId.isValid(id);
 
@@ -31,10 +32,10 @@ exports.login = async (req, res) => {
   if (!email || !password) {
     throw new AppError('Please provide email and password!', 400);
   }
-  const  user = await User.findOne({ email }).select('+password');
+  const user = await User.findOne({ email }).select('+password');
 
   if (!user) throw new AppError('invalid email or password !', 400);
-  if (!await user.matchPassword(password))
+  if (!(await user.matchPassword(password)))
     throw new AppError('invalid email or password !', 400);
 
   user.password = undefined;
@@ -48,38 +49,32 @@ exports.login = async (req, res) => {
   });
 };
 
-exports.protect = async (req,res,next) => 
-{
-  
+exports.protect = async (req, res, next) => {
   if (
-     !req.headers.authorization || 
-     !req.headers.authorization.startsWith('Bearer')
-  )
-  {
+    !req.headers.authorization ||
+    !req.headers.authorization.startsWith('Bearer')
+  ) {
     throw new AppError('You must have auth header ', 401);
-
   }
   const token = req.headers.authorization.split(' ')[1];
   let decoded;
-try {
-  decoded = jwt.verify(token, process.env.JWT_SECRET);
-} catch (err) {
-  throw new AppError('Invalid or expired token', 401);
-}
+  try {
+    decoded = jwt.verify(token, process.env.JWT_SECRET);
+  } catch (err) {
+    throw new AppError('Invalid or expired token', 401);
+  }
 
-   const currentUser = await User.findById(decoded.id);
+  const currentUser = await User.findById(decoded.id);
 
-   if (!currentUser) {
-     return next(
-       new AppError(
-         'The user belonging to this token no longer does exist.',
-         401,
-       ),
-     );
-   }
+  if (!currentUser) {
+    return next(
+      new AppError(
+        'The user belonging to this token no longer does exist.',
+        401,
+      ),
+    );
+  }
 
-   req.user = currentUser;
-   next();
-
-
-}
+  req.user = currentUser;
+  next();
+};
