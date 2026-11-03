@@ -3,6 +3,7 @@ const Booking = require('./../models/bookingModel');
 const mongoose = require('mongoose');
 const AppError = require('../utils/appError');
 const jwt = require('jsonwebtoken');
+const redis = require('../utils/redis');
 const isValidId = (id) =>
   typeof id === 'string' && mongoose.Types.ObjectId.isValid(id);
 
@@ -76,5 +77,16 @@ exports.protect = async (req, res, next) => {
   }
 
   req.user = currentUser;
+  next();
+};
+
+exports.ratelimit = async (req, res, next) => {
+  const key = `ratelimit:${req.user.id}`;
+  const count = await redis.incr(key);
+
+  if (count === 1) await redis.expire(key, 60);
+  if (count > 20) {
+    throw new AppError('Too many requests', 429);
+  }
   next();
 };

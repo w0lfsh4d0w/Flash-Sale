@@ -67,68 +67,87 @@ exports.getEventById = async (req, res) => {
 exports.bookEventById = async (req, res) => {
   const { id } = req.params;
   const { quantity } = req.body;
-  const userId = req.user.id
-  // 1) Validate everything before touching the database
+  const userId = req.user.id;
+
+  // 1) Validations
   if (!isValidId(id)) {
     throw new AppError('Invalid event ID format', 400);
   }
-
 
   if (!Number.isInteger(quantity) || quantity < 1 || quantity > 4) {
     throw new AppError('quantity must be an integer from 1 to 4', 400);
   }
 
-  // check if user book this event before 
+  const idempotencyKey = req.headers['idempotency-key'];
 
-  const existing = await Booking.findOne({ userId, eventId: id });
-  if (existing) throw new AppError('You already Booked this event', 409);
-
-  // 3) atomic with redis
-  const [status, priceCents] = await redis.eval(
-    RESERVE_SCRIPT,
-    1,
-    `event:${id}`,
-    quantity,
-  );
-
-  // 3) Failure path: tell "not found" apart from "sold out"
-  if (status === -1) throw new AppError('No event found with that ID', 404);
-
-  if (status === 0) throw new AppError('Not enough tickets available!', 400);
-
-  // (4.1 set booking in queue
-
-  // Make id
-  const bookingId = new mongoose.Types.ObjectId();
-  // add job to queu
-
-  try {
-    await bookingQueue.add('create-booking', {
-      bookingId: bookingId.toString(),
-      userId,
-      eventId: id,
-      quantity,
-      totalPriceCents: quantity * priceCents,
-    });
-    await redis.set(`booking:${bookingId}`, 'processing', 'EX', 3600);
-  } catch (err) {
-    try {
-      await redis.hincrby(`event:${id}`, 'availableTickets', quantity);
-    } catch (rollbackErr) {
-      console.error(
-        'ROLLBACK FAILED, tickets lost:',
-        id,
-        quantity,
-        rollbackErr,
-      );
-    }
-    throw err;
+  if (!idempotencyKey) {
+    throw new AppError(
+      'Idempotency-Key header is required for booking requests',
+      400,
+    );
   }
 
-  // edit response
-  // 5) Respond only after everything succeeded
-  res.status(202).json({
-    status: 'processing',
-    data: { bookingId },
-  });
+  const lockKey = `idempotency:booking:${userId}:${idempotencyKey}`;
+  const expireTime = process.env.IDEMPOTENCY_KEY_EXPIRE_SECONDS || 86400;
+
+  // Atomic set in Redis
+  const isNewRequest = await redis.set(
+    lockKey,
+    'processing',
+    'EX',
+    expireTime,
+    'NX',
+  );
+
+  if (!isNewRequest) {
+    throw new AppError(
+      'Duplicate booking request detected. Request already processed or in progress.',
+      409,
+    );
+  }
+
+  try {
+    // 3) Check DB for previous booking
+    const existing = await Booking.findOne({ userId, eventId: id });
+    if (existing) throw new AppError('You already Booked this event', 409);
+
+    // 4) Atomic reserve in Redis via Lua Script
+    const [status, priceCents] = await redis.eval(
+      RESERVE_SCRIPT,
+      1,
+      `event:${id}`,
+      quantity,
+    );
+
+    if (status === -1) throw new AppError('No event found with that ID', 404);
+    if (status === 0) throw new AppError('Not enough tickets available!', 400);
+
+    // 5) Queueing & Tracking
+    const bookingId = new mongoose.Types.ObjectId();
+
+    try {
+      await bookingQueue.add('create-booking', {
+        bookingId: bookingId.toString(),
+        userId,
+        eventId: id,
+        quantity,
+        totalPriceCents: quantity * priceCents,
+      });
+
+      await redis.set(`booking:${bookingId}`, 'processing', 'EX', 3600);
+    } catch (queueErr) {
+      // Rollback Redis Tickets if Queue fails
+      await redis.hincrby(`event:${id}`, 'availableTickets', quantity);
+      throw queueErr;
+    }
+
+    // 6) Fast Response
+    res.status(202).json({
+      status: 'processing',
+      data: { bookingId },
+    });
+  } catch (err) {
+    await redis.del(lockKey);
+    throw err;
+  }
 };
