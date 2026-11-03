@@ -33,11 +33,16 @@ exports.createEvent = async (req, res) => {
     availableTickets: totalTickets,
     priceCents,
   });
-  await redis.hset(`event:${newEvent._id}`, {
-    totalTickets: newEvent.totalTickets,
-    availableTickets: newEvent.availableTickets,
-    priceCents: newEvent.priceCents,
-  });
+  try {
+    await redis.hset(`event:${newEvent._id}`, {
+      totalTickets: newEvent.totalTickets,
+      availableTickets: newEvent.availableTickets,
+      priceCents: newEvent.priceCents,
+    });
+  } catch (err) {
+    await Event.deleteOne({ _id: newEvent._id });
+    throw err;
+  }
   res.status(201).json({
     status: 'success',
     data: { event: newEvent },
@@ -87,7 +92,8 @@ exports.bookEventById = async (req, res) => {
 
   if (idempotencyKey) {
     lockKey = `idempotency:booking:${userId}:${idempotencyKey}`;
-    const expireTime = Number(process.env.IDEMPOTENCY_KEY_EXPIRE_SECONDS) || 86400;
+    const expireTime =
+      Number(process.env.IDEMPOTENCY_KEY_EXPIRE_SECONDS) || 86400;
 
     const isNewRequest = await redis.set(
       lockKey,
