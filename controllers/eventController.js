@@ -78,40 +78,41 @@ exports.bookEventById = async (req, res) => {
     throw new AppError('quantity must be an integer from 1 to 4', 400);
   }
 
+  // 2) The id exists before anything is saved, so we can store it in the idempotency key
+  const bookingId = new mongoose.Types.ObjectId();
+
+  // 3) Idempotency (optional header)
   const idempotencyKey = req.headers['idempotency-key'];
+  let lockKey = null;
 
-  if (!idempotencyKey) {
-    throw new AppError(
-      'Idempotency-Key header is required for booking requests',
-      400,
+  if (idempotencyKey) {
+    lockKey = `idempotency:booking:${userId}:${idempotencyKey}`;
+    const expireTime = Number(process.env.IDEMPOTENCY_KEY_EXPIRE_SECONDS) || 86400;
+
+    const isNewRequest = await redis.set(
+      lockKey,
+      bookingId.toString(),
+      'EX',
+      expireTime,
+      'NX',
     );
-  }
 
-  const lockKey = `idempotency:booking:${userId}:${idempotencyKey}`;
-  const expireTime = process.env.IDEMPOTENCY_KEY_EXPIRE_SECONDS || 86400;
-
-  // Atomic set in Redis
-  const isNewRequest = await redis.set(
-    lockKey,
-    'processing',
-    'EX',
-    expireTime,
-    'NX',
-  );
-
-  if (!isNewRequest) {
-    throw new AppError(
-      'Duplicate booking request detected. Request already processed or in progress.',
-      409,
-    );
+    if (!isNewRequest) {
+      // Same request again: return the same answer, take no ticket
+      const savedId = await redis.get(lockKey);
+      return res.status(202).json({
+        status: 'processing',
+        data: { bookingId: savedId },
+      });
+    }
   }
 
   try {
-    // 3) Check DB for previous booking
+    // 4) Quick check for rule 2
     const existing = await Booking.findOne({ userId, eventId: id });
-    if (existing) throw new AppError('You already Booked this event', 409);
+    if (existing) throw new AppError('You already booked this event', 409);
 
-    // 4) Atomic reserve in Redis via Lua Script
+    // 5) Atomic reserve in Redis
     const [status, priceCents] = await redis.eval(
       RESERVE_SCRIPT,
       1,
@@ -122,9 +123,7 @@ exports.bookEventById = async (req, res) => {
     if (status === -1) throw new AppError('No event found with that ID', 404);
     if (status === 0) throw new AppError('Not enough tickets available!', 400);
 
-    // 5) Queueing & Tracking
-    const bookingId = new mongoose.Types.ObjectId();
-
+    // 6) Queue + tracking
     try {
       await bookingQueue.add('create-booking', {
         bookingId: bookingId.toString(),
@@ -136,18 +135,16 @@ exports.bookEventById = async (req, res) => {
 
       await redis.set(`booking:${bookingId}`, 'processing', 'EX', 3600);
     } catch (queueErr) {
-      // Rollback Redis Tickets if Queue fails
       await redis.hincrby(`event:${id}`, 'availableTickets', quantity);
       throw queueErr;
     }
 
-    // 6) Fast Response
     res.status(202).json({
       status: 'processing',
       data: { bookingId },
     });
   } catch (err) {
-    await redis.del(lockKey);
+    if (lockKey) await redis.del(lockKey);
     throw err;
   }
 };

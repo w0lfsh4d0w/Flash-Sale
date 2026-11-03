@@ -1,15 +1,19 @@
 // Usage:
 //    node scripts/loadtest.js --smoke    (small trial run, just to check the script works)
-//    node scripts/loadtest.js stage4     (the real run; the argument is only a label for the result file)
+//    node scripts/loadtest.js stage5     (the real run)
+
+require('dotenv').config({ path: './config.env' });
 
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const autocannon = require('autocannon');
 const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken');
 
 const redis = require('../utils/redis');
 const Booking = require('../models/bookingModel');
+const User = require('../models/userModel');
 
 // ---- Test settings: DO NOT change these between stages ----
 const TOTAL_TICKETS = 1000;
@@ -24,15 +28,31 @@ const MONGO_URI =
 
 const args = process.argv.slice(2);
 const SMOKE = args.includes('--smoke');
-const label = args.find((a) => !a.startsWith('--')) || 'stage4';
+const label = args.find((a) => !a.startsWith('--')) || 'stage5';
 
 const amount = SMOKE ? 50 : AMOUNT;
 const connections = SMOKE ? 5 : CONNECTIONS;
+const userCount = amount; // one distinct user per request
 
-// A valid MongoDB ObjectId is 24 hex characters (12 random bytes)
-const randomObjectId = () => crypto.randomBytes(12).toString('hex');
+// 1) Create users directly in MongoDB and sign their tokens (skips slow bcrypt)
+async function setupUsers() {
+  const run = Date.now();
+  const docs = Array.from({ length: userCount }, (_, i) => ({
+    name: `LoadUser ${i}`,
+    email: `loaduser_${run}_${i}@example.com`,
+    password: crypto.randomBytes(30).toString('hex'), // dummy value, never used to log in
+  }));
 
-// 1) Create a fresh event for this run
+  const users = await User.insertMany(docs);
+
+  return users.map((u) =>
+    jwt.sign({ id: u._id, email: u.email }, process.env.JWT_SECRET, {
+      expiresIn: process.env.JWT_EXPIRES_IN,
+    }),
+  );
+}
+
+// 2) Create a fresh event for this run
 async function createEvent() {
   const res = await fetch(`${API_URL}/api/v1/events`, {
     method: 'POST',
@@ -45,18 +65,17 @@ async function createEvent() {
   });
 
   if (!res.ok) {
-    throw new Error(
-      `Could not create event: ${res.status} ${await res.text()}`,
-    );
+    throw new Error(`Could not create event: ${res.status} ${await res.text()}`);
   }
 
   const json = await res.json();
   return json.data.event._id;
 }
 
-// 2) Fire the requests
-function runLoad(eventId) {
+// 3) Fire the requests: each request uses the next token, so every user books once
+function runLoad(eventId, tokens) {
   const bookingPath = `/api/v1/events/${eventId}/book`;
+  let next = 0;
 
   return autocannon({
     url: `${API_URL}${bookingPath}`,
@@ -66,13 +85,14 @@ function runLoad(eventId) {
       {
         method: 'POST',
         path: bookingPath,
-        headers: { 'content-type': 'application/json' },
-        // runs before EVERY request, so every request gets a different userId
         setupRequest: (request) => {
-          request.body = JSON.stringify({
-            userId: randomObjectId(),
-            quantity: 1,
-          });
+          const token = tokens[next++ % tokens.length];
+          request.headers = {
+            'content-type': 'application/json',
+            authorization: `Bearer ${token}`,
+            'idempotency-key': crypto.randomUUID(),
+          };
+          request.body = JSON.stringify({ quantity: 1 });
           return request;
         },
       },
@@ -80,7 +100,7 @@ function runLoad(eventId) {
   });
 }
 
-// 3) Wait until the worker has written all accepted bookings to MongoDB
+// 4) Wait until the worker has written all accepted bookings to MongoDB
 async function waitForDrain(eventId, expected, timeoutMs = 60000) {
   const start = Date.now();
   const oid = new mongoose.Types.ObjectId(eventId);
@@ -89,29 +109,31 @@ async function waitForDrain(eventId, expected, timeoutMs = 60000) {
     if (count >= expected) return Date.now() - start;
     await new Promise((r) => setTimeout(r, 100));
   }
-  return null; // did not finish within the timeout
+  return null;
 }
 
 async function main() {
   await mongoose.connect(MONGO_URI);
+
+  console.log(`Creating ${userCount} users...`);
+  const tokens = await setupUsers();
 
   const eventId = await createEvent();
   console.log(
     `Event ${eventId} created. Running ${amount} requests on ${connections} connections...`,
   );
 
-  const result = await runLoad(eventId);
+  const result = await runLoad(eventId, tokens);
   process.stdout.write(autocannon.printResult(result));
 
   const stats = result.statusCodeStats || {};
   const accepted202 = Number(stats['202']?.count || 0);
   const rejected400 = Number(stats['400']?.count || 0);
+  const rejected409 = Number(stats['409']?.count || 0);
+  const rejected429 = Number(stats['429']?.count || 0);
 
-  // How long after the last response until the last booking is in MongoDB
   const drainMs = await waitForDrain(eventId, accepted202);
 
-  // 4) Verify what really happened
-  // Bookings live in MongoDB, the stock counter lives in Redis
   const agg = await Booking.aggregate([
     { $match: { eventId: new mongoose.Types.ObjectId(eventId) } },
     {
@@ -131,7 +153,7 @@ async function main() {
     label,
     smoke: SMOKE,
     eventId,
-    settings: { totalTickets: TOTAL_TICKETS, amount, connections },
+    settings: { totalTickets: TOTAL_TICKETS, amount, connections, users: userCount },
     reqPerSec: result.requests.average,
     avgLatencyMs: result.latency.average,
     p99LatencyMs: result.latency.p99,
@@ -142,18 +164,18 @@ async function main() {
     non2xx: result.non2xx,
     accepted202,
     rejected400,
+    rejected409,
+    rejected429,
     bookingsInDb: bookings,
     ticketsBookedInDb: tickets,
-    availableTicketsFinal: available, // read from Redis
+    availableTicketsFinal: available,
     oversold: Math.max(0, tickets - TOTAL_TICKETS),
-    // 0 means Redis counter and Mongo bookings agree; anything else means they drifted
     stockMismatch: tickets + available - TOTAL_TICKETS,
   };
 
   console.log('\n=== SUMMARY ===');
   console.log(summary);
 
-  // 5) Save the raw result
   const dir = path.join(__dirname, '..', 'results');
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(
@@ -165,6 +187,7 @@ async function main() {
 
   await mongoose.disconnect();
   await redis.quit();
+  process.exit(0);
 }
 
 main().catch((err) => {
