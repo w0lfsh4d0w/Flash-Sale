@@ -10,6 +10,7 @@ services:
       - DATABASE_LOCAL=mongodb://mongo_db:27017/flash-sale
       - REDIS_URL=redis://redis:6379
       - QUEUE_REDIS_URL=redis://redis_queue:6379
+      - WEBHOOK_SECRET=any-long-random-string
     depends_on:
       - mongo_db
       - redis

@@ -24,7 +24,7 @@ exports.getBookingById = async (req, res) => {
     });
   }
 
-  const booking = await Booking.findById(id).lean();
+  const booking = await Booking.findOne({ _id: id, userId: req.user.id }).lean();
 
   if (booking) {
     return res.status(200).json({
@@ -40,8 +40,9 @@ exports.getBookingById = async (req, res) => {
 
 exports.payBooking = async (req, res) => {
   const { id } = req.params;
+  if (!isValidId(id)) throw new AppError('Invalid booking ID format', 400);
   // atomic update
-  const booking = await  Booking.findOneAndUpdate(
+  const booking = await Booking.findOneAndUpdate(
     {
       _id: id,
       userId: req.user.id,
@@ -65,6 +66,68 @@ exports.payBooking = async (req, res) => {
     status: 'success',
     data: {
       booking,
+    },
+  });
+};
+exports.handlePaymentWebhook = async (req, res) => {
+  if (req.headers['x-webhook-secret'] !== process.env.WEBHOOK_SECRET) {
+    throw new AppError('Invalid signature', 401);
+  }
+  const { bookingId, status, paymentIntentId } = req.body;
+
+  if (!paymentIntentId) {
+    return res
+      .status(400)
+      .json({ status: 'fail', message: 'Missing paymentIntentId' });
+  }
+  //Idempotency
+  const isNewEvent = await redis.set(
+    `webhook:${paymentIntentId}`,
+    'processed',
+    'EX',
+    86400,
+    'NX',
+  );
+
+  if (!isNewEvent) {
+    return res.status(200).json({
+      received: true,
+      message: 'Event already processed (Idempotent response)',
+    });
+  }
+
+  if (status !== 'payment_success') {
+    return res.status(200).json({
+      received: true,
+      message: 'Payment status is not successful',
+    });
+  }
+
+  const booking = await Booking.findOneAndUpdate(
+    {
+      _id: bookingId,
+      status: 'reserved',
+      expiresAt: { $gt: new Date() },
+    },
+    {
+      status: 'confirmed',
+      expiresAt: null,
+    },
+    { returnDocument: 'after' },
+  );
+
+  if (!booking) {
+    return res.status(200).json({
+      received: true,
+      message: 'Booking not found, expired, or already confirmed',
+    });
+  }
+
+  res.status(200).json({
+    received: true,
+    data: {
+      bookingId: booking._id,
+      status: booking.status,
     },
   });
 };
