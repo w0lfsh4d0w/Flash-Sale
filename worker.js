@@ -46,7 +46,7 @@ mongoose
             quantity,
             totalPriceCents,
             status: 'reserved',
-            expiresAt: new Date(Date.now() + 5 * 60 * 1000), // test value, back to 5 * 60 * 1000 after testing
+            expiresAt: new Date(Date.now() + 5 * 60 * 1000), 
           });
 
           await redis.del(`booking:${bookingId}`);
