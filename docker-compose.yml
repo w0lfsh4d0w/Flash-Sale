@@ -1,31 +1,21 @@
-
 services:
   app:
     build: .
     expose:
       - "3000"
-    environment:
-      - NODE_ENV=${NODE_ENV:-development}
-      - PORT=3000
-      - DATABASE_LOCAL=mongodb://mongo_db:27017/flash-sale
-      - REDIS_URL=redis://redis:6379
-      - QUEUE_REDIS_URL=redis://redis_queue:6379
-      - WEBHOOK_SECRET=any-long-random-string
+    env_file:
+      - .env
     depends_on:
       - mongo_db
       - redis
       - redis_queue
 
-
   worker:
     build: .
     command: node worker.js
     restart: on-failure
-    environment:
-      - NODE_ENV=${NODE_ENV:-development}
-      - DATABASE_LOCAL=mongodb://mongo_db:27017/flash-sale
-      - QUEUE_REDIS_URL=redis://redis_queue:6379
-      - REDIS_URL=redis://redis:6379
+    env_file:
+      - .env
     depends_on:
       - mongo_db
       - redis_queue
@@ -47,7 +37,6 @@ services:
     volumes:
       - mongo_data:/data/db
 
-
   redis:
     image: redis:7-alpine
     container_name: ticket_redis
@@ -56,7 +45,6 @@ services:
       - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
-
 
   redis_queue:
     image: redis:7-alpine
