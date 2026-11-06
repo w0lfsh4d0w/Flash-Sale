@@ -19,6 +19,18 @@ I'm starting with a naive version on purpose, measuring how bad it gets, and the
 
 All four rules are enforced since stage 5.
 
+## Architecture
+
+![Architecture](docs/architecture.svg)
+
+The booking path in short:
+
+1. The API checks the JWT, the rate limit and the idempotency key, then checks rule 2 in MongoDB.
+2. A Lua script in Stock Redis checks and decreases the stock in one atomic step. If it is sold out, the API answers `400` right away.
+3. If tickets were reserved, the API adds a job to the BullMQ queue and answers `202` with a `bookingId`.
+4. The worker takes the job and saves the booking in MongoDB as `reserved`, with `expiresAt` 5 minutes ahead.
+5. The user pays (`/pay` or the webhook) and the booking becomes `confirmed`. If they don't, the expiry job gives the tickets back.
+
 ## Data Model
 
 ![ERD](docs/Flash_Sale.png)
@@ -73,7 +85,7 @@ Node.js, Express 5, MongoDB (Mongoose), Redis, BullMQ, JWT, bcrypt, Docker.
 | 3   | Redis for stock (atomic Lua script)                                    | Done                                |
 | 3b  | GET /events/:id reads Redis stock                                      | Done                                |
 | 4   | BullMQ queue and worker                                                | Done                                |
-| 5   | Auth, reservations, mock payment, idempotency, rate limiting           | Done (internal events not built)    |
+| 5   | Auth, reservations, mock payment, idempotency, rate limiting           | Done                                |
 | 6   | nginx, CI/CD, deploy                                                   | Not started                         |
 | 7   | Tests, logging, final benchmarks                                       | Not started                         |
 
