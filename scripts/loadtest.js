@@ -2,7 +2,8 @@
 //    node scripts/loadtest.js --smoke    (small trial run, just to check the script works)
 //    node scripts/loadtest.js stage5     (the real run)
 
-require('dotenv').config({ path: './config.env' });
+require('dotenv').config({ path: './.env' });
+process.env.REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 
 const crypto = require('crypto');
 const fs = require('fs');

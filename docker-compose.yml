@@ -5,6 +5,12 @@ services:
       - "3000"
     env_file:
       - .env
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=3000
+      - DATABASE_LOCAL=mongodb://mongo_db:27017/flash-sale
+      - REDIS_URL=redis://redis:6379
+      - QUEUE_REDIS_URL=redis://redis_queue:6379
     depends_on:
       - mongo_db
       - redis
@@ -16,6 +22,11 @@ services:
     restart: on-failure
     env_file:
       - .env
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - DATABASE_LOCAL=mongodb://mongo_db:27017/flash-sale
+      - REDIS_URL=redis://redis:6379
+      - QUEUE_REDIS_URL=redis://redis_queue:6379
     depends_on:
       - mongo_db
       - redis_queue

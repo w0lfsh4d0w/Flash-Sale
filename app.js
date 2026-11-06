@@ -20,41 +20,37 @@ if (process.env.NODE_ENV === 'development') {
 app.use(express.json({ limit: '10kb' }));
 
 // 2) ROUTES (each endpoint gets added here)
+const withTimeout = (promise, ms = 1000) => {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('timeout')), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+};
+
+const pingOk = async (client) => {
+  try {
+    return (await withTimeout(client.ping())) === 'PONG';
+  } catch (err) {
+    return false;
+  }
+};
 app.get('/health', async (req, res) => {
+  const [stockRedis, queueRedis] = await Promise.all([
+    pingOk(redis),
+    pingOk(queueConnection),
+  ]);
+
   const healthDetails = {
-    mongo: false,
-    stockRedis: false,
-    queueRedis: false,
+    mongo: mongoose.connection.readyState === 1,
+    stockRedis,
+    queueRedis,
   };
 
-  // 1) Check MongoDB
-  healthDetails.mongo = mongoose.connection.readyState === 1;
-
-  // 2) Check Stock Redis Connection
-  try {
-    const stockReply = await redis.ping();
-    healthDetails.stockRedis = stockReply === 'PONG';
-  } catch (err) {
-    healthDetails.stockRedis = false;
-  }
-
-  // 3) Check Queue Redis Connection
-  try {
-    const queueReply = await queueConnection.ping();
-    healthDetails.queueRedis = queueReply === 'PONG';
-  } catch (err) {
-    healthDetails.queueRedis = false;
-  }
-
-  // Check overall system health
   const isHealthy =
-    healthDetails.mongo &&
-    healthDetails.stockRedis &&
-    healthDetails.queueRedis;
+    healthDetails.mongo && healthDetails.stockRedis && healthDetails.queueRedis;
 
-  const statusCode = isHealthy ? 200 : 503;
-
-  return res.status(statusCode).json({
+  return res.status(isHealthy ? 200 : 503).json({
     status: isHealthy ? 'success' : 'error',
     instance: os.hostname(),
     message: isHealthy
@@ -64,7 +60,6 @@ app.get('/health', async (req, res) => {
     services: healthDetails,
   });
 });
-
 app.use('/api/v1/events', eventRouter);
 app.use('/api/v1/bookings', bookingRouter);
 app.use('/api/v1/auth', authRouter);

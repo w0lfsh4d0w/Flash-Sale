@@ -1,5 +1,7 @@
 # Flash-Sale
 
+![CI](https://github.com/w0lfsh4d0w/Flash-Sale/actions/workflows/ci.yml/badge.svg)
+
 A backend API for booking tickets to events, built to survive the moment when thousands of people hit "book" at the same time on a limited number of tickets.
 
 > 🚧 Work in progress. I'm building this stage by stage and measuring every step.
@@ -25,11 +27,14 @@ All four rules are enforced since stage 5.
 
 The booking path in short:
 
-1. The API checks the JWT, the rate limit and the idempotency key, then checks rule 2 in MongoDB.
-2. A Lua script in Stock Redis checks and decreases the stock in one atomic step. If it is sold out, the API answers `400` right away.
-3. If tickets were reserved, the API adds a job to the BullMQ queue and answers `202` with a `bookingId`.
-4. The worker takes the job and saves the booking in MongoDB as `reserved`, with `expiresAt` 5 minutes ahead.
-5. The user pays (`/pay` or the webhook) and the booking becomes `confirmed`. If they don't, the expiry job gives the tickets back.
+1. nginx is the only service that publishes a port (3000). It sends each request to one of the API instances.
+2. The API checks the JWT, the rate limit and the idempotency key, then checks rule 2 in MongoDB.
+3. A Lua script in Stock Redis checks and decreases the stock in one atomic step. If it is sold out, the API answers `400` right away.
+4. If tickets were reserved, the API adds a job to the BullMQ queue and answers `202` with a `bookingId`.
+5. The worker takes the job and saves the booking in MongoDB as `reserved`, with `expiresAt` 5 minutes ahead.
+6. The user pays (`/pay` or the webhook) and the booking becomes `confirmed`. If they don't, the expiry job gives the tickets back.
+
+All the state that decides a booking (stock, rate limit, idempotency) lives in Redis and MongoDB, not in the memory of an API process. That is what lets more than one API instance run side by side.
 
 ## Data Model
 
@@ -62,6 +67,7 @@ Redis keys (two separate Redis instances):
 | POST   | `/api/v1/auth/signup`         | no      | Create a user (`name`, `email`, `password`). Returns a JWT                                                   |
 | POST   | `/api/v1/auth/login`          | no      | Log in (`email`, `password`). Returns a JWT                                                                  |
 | POST   | `/api/v1/events`              | no      | Create an event (`name`, `totalTickets`, `priceCents`)                                                       |
+| GET    | `/health`                     | no      | Checks MongoDB, Stock Redis and Queue Redis. `200` if all are up, `503` if any is down, with the status of each service and the instance name |
 | GET    | `/api/v1/events/:id`          | no      | Get an event; `availableTickets` is the live number from Redis                                               |
 | POST   | `/api/v1/events/:id/book`     | JWT     | Book tickets (`quantity` 1 to 4). The user comes from the token. Optional `Idempotency-Key` header. Returns `202` with a `bookingId` |
 | GET    | `/api/v1/bookings/:id`        | JWT     | The booking, or `processing` / `failed`, or `404`                                                            |
@@ -74,7 +80,7 @@ All errors return a consistent JSON response (`status` and `message`).
 
 ## Tech Stack
 
-Node.js, Express 5, MongoDB (Mongoose), Redis, BullMQ, JWT, bcrypt, Docker.
+Node.js, Express 5, MongoDB (Mongoose), Redis, BullMQ, JWT, bcrypt, Docker, nginx, GitHub Actions.
 
 ## Stages
 
@@ -86,7 +92,7 @@ Node.js, Express 5, MongoDB (Mongoose), Redis, BullMQ, JWT, bcrypt, Docker.
 | 3b  | GET /events/:id reads Redis stock                                      | Done                                |
 | 4   | BullMQ queue and worker                                                | Done                                |
 | 5   | Auth, reservations, mock payment, idempotency, rate limiting           | Done                                |
-| 6   | nginx, CI/CD, deploy                                                   | Not started                         |
+| 6   | nginx, health check, 3 API instances, secrets in `.env`, CI            | Done (VPS deploy not done)          |
 | 7   | Tests, logging, final benchmarks                                       | Not started                         |
 
 ## Known limitations (current stage)
@@ -107,6 +113,10 @@ Node.js, Express 5, MongoDB (Mongoose), Redis, BullMQ, JWT, bcrypt, Docker.
 - If saving the event hash in Redis fails after the event is created in MongoDB, that event answers 404 on every booking. `POST /events` is also not protected yet.
 - There is no endpoint to cancel a booking.
 - There is no dashboard for failed jobs yet.
+- The worker still runs as a single instance. Marking a booking `expired` is one atomic update that only matches `reserved`, so a duplicate expiry job should not give tickets back twice, but I did not test it with more than one worker.
+- nginx is a single point of failure, and nothing uses `GET /health` yet to stop sending requests to an unhealthy API instance.
+- nginx resolves the `app` service name when it starts. If I change the number of API instances after that, nginx has to be restarted to see the new ones.
+- CI only installs the dependencies and builds the Docker image. No tests run in it yet (stage 7).
 
 ## How I measure
 
@@ -119,12 +129,15 @@ Node.js, Express 5, MongoDB (Mongoose), Redis, BullMQ, JWT, bcrypt, Docker.
 - From stage 3 on, the load test reads the final stock from Redis (where the counter lives) and the bookings from MongoDB. "Stock mismatch" compares the two: 0 means the Redis counter and the MongoDB bookings agree.
 - From stage 4 on, a successful request returns `202`, so the response time no longer includes the MongoDB write. The load test also waits until the worker has saved every accepted booking, and reports `drainSec`: the time from the end of the load until the last booking is in MongoDB. It is the remaining time, not the total write time, because the worker runs while the load is still going.
 - From stage 5 on, every request needs a JWT and an `Idempotency-Key`, and rule 2 allows one booking per user. So the load test creates 5,000 users directly in MongoDB, signs a token for each one, and every request uses a different user. This is a different test from stages 1 to 4, so the numbers are not directly comparable.
+- From stage 6 on, the same stage 5 test runs through nginx against 3 API instances, so stages 5 and 6 are comparable. The load test runs on the host and reads `JWT_SECRET` from `.env`.
 - Before each run I checked that the queue was empty.
 
 ## Test Environment
 
 - **Host Specs:** 8 CPU Cores, 8 GB RAM.
 - **Docker Allocation:** Default Docker Desktop settings.
+- **nginx (stage 6):** `nginx:1.27-alpine`, round robin (the default), keepalive connections to the API.
+- **API instances (stage 6):** 3 (`--scale app=3`), 1 worker.
 - **Node.js Environment:** `NODE_ENV=production` inside Docker, started with `npm start` (API) and `node worker.js` (worker).
 - **Stock Redis:** `redis:7-alpine`, one container, default config.
 - **Queue Redis:** `redis:7-alpine`, one container, `--maxmemory 256mb --maxmemory-policy noeviction`.
@@ -145,12 +158,13 @@ Same test every time: 1,000 tickets, 5,000 requests sent over 200 concurrent con
 | **3. Redis**        | Atomic Lua script in Redis          | 1,389 (1,250 - 1,667) | 427 ms (300 - 492 ms)      | 0      | 4,000               | 1,000 / 1,000      | 0        |
 | **4. Queue**        | Redis + BullMQ worker               | 1,250 (1,250 - 1,250) | 238 ms (212 - 262 ms)      | 0      | 4,000               | 1,000 / 1,000      | 0        |
 | **5. Full rules**   | Queue + auth, rules, idempotency, rate limit | 509 (417 - 556) | 1,227 ms (565 - 2,519 ms)  | 0      | 4,000               | 1,000 / 1,000      | 0        |
+| **6. nginx + 3 API** | Stage 5 behind nginx, 3 API instances | 470 (455 - 500)   | 1,040 ms (748 - 1,337 ms)  | 0      | 4,000               | 1,000 / 1,000      | 0        |
 
 Notes on the table:
 
 - In stages 1 to 3 a successful request meant "the booking is saved" (`201`). From stage 4 it means "accepted" (`202`), so those numbers measure the response, not the write. The write is measured separately by `drainSec`.
-- Stage 4 `drainSec`: 0.010 s on average (0.008 - 0.011 s). Stage 5 `drainSec`: 0.010 s on average (0.008 - 0.012 s).
-- Stage 5 is a different test (authenticated, 5,000 distinct users, idempotency key on every request), so it is not directly comparable to stages 1 to 4.
+- Stage 4 `drainSec`: 0.010 s on average (0.008 - 0.011 s). Stage 5 `drainSec`: 0.010 s on average (0.008 - 0.012 s). Stage 6 `drainSec`: 0.008 s in all 3 runs.
+- Stage 5 is a different test (authenticated, 5,000 distinct users, idempotency key on every request), so it is not directly comparable to stages 1 to 4. Stage 6 runs the same test as stage 5, so those two rows can be compared.
 - Stage 3b only changed `GET /events/:id`, not the booking path, so it has no new benchmark.
 
 ### What I Saw in Stage 1
@@ -215,11 +229,26 @@ Notes on the table:
   - No request was rejected by rule 2 or by the rate limit (`rejected409` and `rejected429` were 0), because each user booked once. The benchmark measures what these checks cost, not how they behave under pressure.
   - The payment flow, the expiry job and the idempotent retry were checked by hand, not by automated tests.
   - `drainSec` was again about 10 ms, so the worker kept up.
-- **What's next:** Stage 6 adds nginx, more than one API and worker instance, CI/CD and a deploy to a VPS. Stage 7 adds automated tests (the overselling test first), structured logging and the final benchmarks.
+- **What's next:** Stage 6 adds nginx, more than one API instance, a health check, secrets in `.env` and CI.
+
+### What I Saw in Stage 6
+
+- **What changed:**
+  - **nginx as a reverse proxy:** nginx is the only service that publishes port 3000. The API containers only listen inside the Docker network, so more than one instance can run without fighting over a host port.
+  - **More than one API instance:** `docker compose up -d --scale app=3`. nginx reaches all of them through the `app` service name and balances the requests.
+  - **Health check:** `GET /health` checks MongoDB, Stock Redis and Queue Redis. It answers `200` when all three are up and `503` when any of them is down, and the response says which one. Each Redis ping has a 1 second timeout, because without it the endpoint hung when Redis was down instead of answering `503`. It also returns the container's hostname, which shows which API instance answered.
+  - **Secrets:** `JWT_SECRET` and `WEBHOOK_SECRET` moved out of `docker-compose.yml` into `.env`, which is not committed. `.env.example` lists the keys. The service addresses (`mongo_db`, `redis`) stay in the compose file because they are not secrets.
+  - **CI:** a GitHub Actions workflow runs `npm ci` and builds the Docker image on every push.
+- **Correctness held with 3 API instances:** In all 3 runs exactly 1,000 requests were accepted, 4,000 were rejected as sold out, 1,000 bookings ended up in MongoDB, nothing was oversold, and the stock mismatch was 0. The stock check is one Lua script in Redis, so it does not matter which instance receives the request.
+- **Throughput and p99: no claim.** 470 req/s vs 509 in stage 5, and p99 1,040 ms vs 1,227 ms. The ranges overlap in both (455-500 vs 417-556, and 748-1,337 vs 565-2,519), so this is noise, not a result.
+- **The extra instances did not make it faster.** My guess, which I did not measure: the load generator, 3 API instances, nginx, MongoDB and both Redis instances all share the same 8 cores, and MongoDB and Redis were not scaled. I did not run nginx with a single API instance and I did not record CPU usage, so I can't say how much nginx costs or how much the extra instances helped.
+- **`drainSec` was 0.008 s in all 3 runs:** the worker kept up, as in stages 4 and 5.
+- **Caveats:** There were only 3 runs of 10 to 11 seconds, on one machine. The warm-up run was slower (312 req/s, p99 1,411 ms) and is ignored, as in every stage. The health check (stopping MongoDB, Stock Redis and Queue Redis one at a time), the idempotent retry and the expiry job were checked by hand, not by automated tests.
+- **What's next:** Stage 7 adds automated tests (the overselling test first), structured logging and the final benchmarks. The VPS deploy is not done.
 
 ## Running the project
 
-Environment variables (in `config.env` for running outside Docker, and in `docker-compose.yml` for Docker): `DATABASE_LOCAL`, `REDIS_URL`, `QUEUE_REDIS_URL`, `JWT_SECRET`, `JWT_EXPIRES_IN`, `WEBHOOK_SECRET`, and optionally `IDEMPOTENCY_KEY_EXPIRE_SECONDS`. `config.env` is not committed.
+Secrets are in `.env`: copy `.env.example` and fill in `JWT_SECRET`, `JWT_EXPIRES_IN` and `WEBHOOK_SECRET` (generate a value with `openssl rand -hex 32`). The service addresses (`DATABASE_LOCAL`, `REDIS_URL`, `QUEUE_REDIS_URL`) are set in `docker-compose.yml`. Optionally `IDEMPOTENCY_KEY_EXPIRE_SECONDS`. `.env` is not committed.
 
 **Development** (nodemon, code mounted into the containers, no rebuild after edits):
 
@@ -231,9 +260,9 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 
 ```bash
 docker compose down
-NODE_ENV=production docker compose up -d --build --force-recreate
+NODE_ENV=production docker compose up -d --build --force-recreate --scale app=3
 npm install
 node scripts/loadtest.js my-run-label
 ```
 
-The API runs on `http://localhost:3000`. This starts the API, the worker, MongoDB and both Redis instances.
+The API runs on `http://localhost:3000`, behind nginx. This starts nginx, 3 API instances, the worker, MongoDB and both Redis instances. nginx resolves the `app` name when it starts, so start with `--scale` (as above) or restart nginx after changing the number of instances.
