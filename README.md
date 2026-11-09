@@ -21,6 +21,8 @@ I'm starting with a naive version on purpose, measuring how bad it gets, and the
 
 All four rules are enforced since stage 5.
 
+**Result so far:** zero overselling in every benchmark run from stage 2 to stage 6 (including 3 concurrent API instances) and in the automated tests of stage 7.
+
 ## Architecture
 
 ![Architecture](docs/architecture.svg)
@@ -80,7 +82,7 @@ All errors return a consistent JSON response (`status` and `message`).
 
 ## Tech Stack
 
-Node.js, Express 5, MongoDB (Mongoose), Redis, BullMQ, JWT, bcrypt, Docker, nginx, GitHub Actions.
+Node.js, Express 5, MongoDB (Mongoose), Redis, BullMQ, JWT, bcrypt, Docker, nginx, GitHub Actions, Jest, supertest.
 
 ## Stages
 
@@ -93,7 +95,7 @@ Node.js, Express 5, MongoDB (Mongoose), Redis, BullMQ, JWT, bcrypt, Docker, ngin
 | 4   | BullMQ queue and worker                                                | Done                                |
 | 5   | Auth, reservations, mock payment, idempotency, rate limiting           | Done                                |
 | 6   | nginx, health check, 3 API instances, secrets in `.env`, CI            | Done (VPS deploy not done)          |
-| 7   | Tests, logging, final benchmarks                                       | Not started                         |
+| 7   | Automated tests, run in CI                                             | Done (structured logging not done)  |
 
 ## Known limitations (current stage)
 
@@ -116,7 +118,9 @@ Node.js, Express 5, MongoDB (Mongoose), Redis, BullMQ, JWT, bcrypt, Docker, ngin
 - The worker still runs as a single instance. Marking a booking `expired` is one atomic update that only matches `reserved`, so a duplicate expiry job should not give tickets back twice, but I did not test it with more than one worker.
 - nginx is a single point of failure, and nothing uses `GET /health` yet to stop sending requests to an unhealthy API instance.
 - nginx resolves the `app` service name when it starts. If I change the number of API instances after that, nginx has to be restarted to see the new ones.
-- CI only installs the dependencies and builds the Docker image. No tests run in it yet (stage 7).
+- There is no structured logging. The app uses `console.log`, and `morgan` only in development, so a failed booking leaves no trace that says which user, which instance, or how many attempts.
+- The payment webhook, the worker's retry path and what happens when MongoDB or Redis goes down are not covered by automated tests (they were checked by hand).
+- The tests use one worker. The expiry job with more than one worker is still untested.
 
 ## How I measure
 
@@ -244,7 +248,25 @@ Notes on the table:
 - **The extra instances did not make it faster.** My guess, which I did not measure: the load generator, 3 API instances, nginx, MongoDB and both Redis instances all share the same 8 cores, and MongoDB and Redis were not scaled. I did not run nginx with a single API instance and I did not record CPU usage, so I can't say how much nginx costs or how much the extra instances helped.
 - **`drainSec` was 0.008 s in all 3 runs:** the worker kept up, as in stages 4 and 5.
 - **Caveats:** There were only 3 runs of 10 to 11 seconds, on one machine. The warm-up run was slower (312 req/s, p99 1,411 ms) and is ignored, as in every stage. The health check (stopping MongoDB, Stock Redis and Queue Redis one at a time), the idempotent retry and the expiry job were checked by hand, not by automated tests.
-- **What's next:** Stage 7 adds automated tests (the overselling test first), structured logging and the final benchmarks. The VPS deploy is not done.
+- **What's next:** Stage 7 adds automated tests that run in CI. Structured logging and the VPS deploy are not done.
+
+### What I Saw in Stage 7
+
+- **What changed:** The checks I did by hand in earlier stages are now automated tests (Jest and supertest) that run on every push. The application code did not change, so the stage 6 benchmark numbers are still the final ones and I did not measure again.
+- **How the tests work:** They run against a real MongoDB and real Redis instances, not mocks, because overselling is a problem of those systems. They use their own MongoDB database (`flash-sale-test`) and Redis database number 1, so the real data is never touched, and the test setup refuses to flush any other Redis database. Before the tests start, a real worker process is started against the same test databases. Users are created directly in MongoDB and their tokens are signed in the test, as in the load test.
+- **What the 19 tests cover:**
+  - **Overselling:** 50 users on 10 tickets must give exactly 10 accepted and 40 rejected, and the stock ends at 0. Another test sends 30 users with 3 tickets each on 10 tickets: exactly 3 are accepted and 1 ticket is left.
+  - **Rule 1:** quantities 0, 5, -1 and a non-number are rejected without taking a ticket, and 4 is accepted.
+  - **Rule 2:** a second booking by the same user answers `409`. Five simultaneous requests from one user end with one booking and the extra tickets back in stock, which tests the unique index.
+  - **Rule 3:** a new booking is `reserved` with an expiry about 5 minutes ahead. Paying makes it `confirmed`, and paying again is refused. A user can't pay someone else's booking, and an expired reservation can't be paid. The expiry job marks an expired booking `expired` and gives the ticket back.
+  - **Rule 4:** the stock never goes below 0, and after the expiry job it never goes above the total.
+  - **Other:** the idempotency key (same key twice gives the same answer and takes one ticket), missing or bad token (`401`), the rate limit (`429` after 20 requests), and `/health`.
+- **CI:** The workflow starts MongoDB and two Redis instances as service containers, runs the tests, and then builds the Docker image.
+- **Result:** All 19 tests passed on the first full run (about 32 seconds, mostly the expiry test that waits for the 30 second job).
+- **Caveats:**
+  - I did not yet check that the overselling test fails when the protection is removed. A test that has never failed has not been shown to catch the bug.
+  - The tests check the final state after waiting for the worker, so they don't measure timing.
+  - Jest needs `NODE_OPTIONS=--experimental-vm-modules`. Without it the MongoDB driver can't build its handshake inside Jest's sandbox and the connection fails with "Missing required sub-document 'driver'".
 
 ## Running the project
 
@@ -254,6 +276,13 @@ Secrets are in `.env`: copy `.env.example` and fill in `JWT_SECRET`, `JWT_EXPIRE
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+```
+
+**Tests** (they use their own databases and start their own worker, so only the databases must be running):
+
+```bash
+docker compose up -d mongo_db redis redis_queue
+npm test
 ```
 
 **Benchmark** (production mode, no nodemon, no mounted code). Stop the development containers first:
